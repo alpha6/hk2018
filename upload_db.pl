@@ -1,37 +1,60 @@
 #!/usr/bin/perl
 use v5.28;
-use utf8;
+# use utf8;
 use strict;
 use warnings FATAL => 'all';
 
-use DBIx::Struct;
+use DBIx::Struct qw/connector hash_ref_slice/;
 DBIx::Struct::connect("dbi:SQLite:dbname=hk2018.db","","");
 
 use JSON::SL;
 use Data::Dumper::Concise;
+use Encode qw(decode encode);
+use Unicode::Escape qw(escape unescape);;
+
 my $sl = JSON::SL->new();
 my $cities = {};
 my $countries = {};
 my $interests = {};
 my $statuses = {};
 
-open my $fh, '<', 'test_data/data/accounts_1.json' or die $!;
+
+open my $fh, '<:raw', 'test_data/data/accounts_1.json' or die $!;
 $sl->set_jsonpointer(["/accounts/^"]);
-while (sysread($fh, my $block, 1024000)) {
-    my @Chunks = unpack("(a16)*", $block);
-    foreach my $chunk (@Chunks) {
-        my $res = $sl->feed($chunk);
-        if ($res) {
-            # say "===================================================================================================";
-            # say "Got a chunk of data:";
-            # say Dumper($res);
-            # say "===================================================================================================";
-            add_record($res->{Value});
+$sl->utf8(1);
+my $block_tail = "";
+connector->txn(sub {
+    while (sysread($fh, my $block, 1024)) {
+        $block = $block_tail.$block if ($block_tail);
 
-         }
+        $block =~ m/(.*\}\,\s\{)(.*?)$/;
+        my ($body, $tail) = ($1, $2);
+
+        # say "body [$body]";
+        # say "tail [$tail]";
+
+        if ($tail){
+            $block_tail = $tail;
+        }
+
+
+        eval {
+            $body = unescape($body);
+            my $res = $sl->feed($body);
+            if ($res) {
+                # add_record($res->{Value});
+                say Dumper($res);
+            }
+        };
+        if ($@) {
+            say "$@\n [$body]\n".'='x80;
+            exit 1;
+        }
+
+        $body = undef;
+
     }
-}
-
+});
 close($fh);
 
 sub add_record {
@@ -49,7 +72,7 @@ sub add_record {
         if (exists $cities->{$record->{'city'}}) {
             $city_id = $cities->{$record->{'city'}};
         } else {
-            my $new_city = new_row('cities',  name => $record->{'city'} );
+            my $new_city = new_row('cities',  name => encode('UTF-8', $record->{'city'}, Encode::FB_CROAK));
             $cities->{$new_city->name} = $new_city->id;
             $city_id = $new_city->id;
         }
@@ -74,19 +97,19 @@ sub add_record {
     }
 
     #`accounts` (`id`, `sname`, `fname`, `email`, `status`, `sex`, `phone`, `birth`, `city`, `country`, `joined` )
-    my $account = new_row('accounts',
-        id      => $record->{'id'},
-        sname   => $record->{'sname'},
-        fname   => $record->{'fname'},
-        email   => $record->{'email'},
-        status   => $status_id,
-        sex     => $sex_id,
-        phone   => $record->{'phone'},
-        birth   => $record->{'birth'},
-        city    => $city_id,
-        country => $country_id,
-        joined  => $record->{'joined'},
-    );
+    my $account;
+    eval {
+        $account= new_row('accounts' =>
+            sex     => $sex_id,
+            city    => $city_id,
+            country => $country_id,
+            status   => $status_id,
+            hash_ref_slice $record, qw(id sname fname email phone birth joined)
+        );
+    };
+    if ($@) {
+        die $@;
+    }
 
     my $account_id = $account->id;
 
